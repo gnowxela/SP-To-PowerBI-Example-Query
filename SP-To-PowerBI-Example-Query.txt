@@ -1,0 +1,92 @@
+// By Alex Wong, alex.wong@gimmal.com
+// This PowerBI query gets rows of data out of O365 SharePoint Online based on a SharePoint Search KQL Query sent to the SharePoint REST service.
+// (Have not yet tried on SP2013)
+// It is the only one I have found that can get more than 500 rows, and also can refresh on both Power BI Desktop and Power BI Online.
+// Based entirely on Paul Keijzers' solution at https://sharepoint-specialist.nu/connect-power-bi-online-to-sharepoint-search-using-rest-ca6e681233b8
+// Suggested by Matthew Stark at http://makingthings.work/connect-power-bi-to-sp-search/ . Many many thanks.
+
+// Usage: Paste this code into a PowerBI Query (in the Advanced Editor window) and adjust the urlRequestString to point to your tenant or site.
+// Adjust the querytext= with your KQL query (that you can test in the SharePoint UI, in "Everything" mode).
+// Adjust the selectproperties= with the SharePoint Managed Property values you want returned in the rows. https://technet.microsoft.com/en-us/library/jj219630.aspx https://technet.microsoft.com/en-us/library/jj613136.aspx
+
+// If you want to test as a Function. WILL NOT REFRESH IN POWER BI ONLINE
+//(queryParams as text) as table => 
+
+let
+
+// The URL request string must be essentially static in order for the dataset to refresh in Power BI Online.
+// This means that the entire string must be known based entirely on information in this particular Query before runtime.
+// The syntax below (concatenation of static strings) is pretty much the limit of what you can get away with.
+// ADJUST THE urlRequestString HERE TO POINT TO YOUR TENANT OR SITE
+
+urlRequestString = "https://YourTenantOrSite.sharepoint.com/_api/search/query" & "?querytext='contenttype:Document'&trimduplicates=false&rowlimit=500&selectproperties='Path,Filename'",
+
+// The following two lines will get you a "You can't schedule refresh for this dataset because one or more sources currently don't support refresh." error in PowerBI online.
+//urlRequestString = "https://gimmaltraining1.sharepoint.com/_api/search/query" & queryParams,
+//urlRequestString = queryParams,
+
+// Initial Web request to only get TotalRows
+
+Source = Json.Document(Web.Contents(
+urlRequestString,
+[
+Headers=[#"Accept"="application/json"]
+])),
+
+// RelevantResults will be the total number of rows we expect to download
+
+PrimaryQueryResult = Source[PrimaryQueryResult],
+RelevantResults = PrimaryQueryResult[RelevantResults][TotalRows],
+
+// Generate a table of values for startrow
+
+Offset = List.Generate(()=>0, each _ <= Number.RoundTowardZero( RelevantResults /100)*100, each _ + 500),
+//Convert the list to a table
+OffsetToTable = Table.FromList(Offset, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+Terms = Table.RenameColumns(OffsetToTable,{{"Column1", "Term"}}),
+#"Removed Top Rows" = Table.Skip(Terms,0),
+Termset = Table.TransformColumnTypes(#"Removed Top Rows",{{"Term", type text}}),
+
+// Define the Web request and processing function that will be called multiple times to get the rows we want 500 at a time (the max number of rows SharePoint will return).
+// Note that the only variable part of the request, the startrow, is sent in as a Query parameter, not concatenated to the static urlRequestString.
+// This is how we workaround the static urlRequestString requirement.
+// (I have not been able to make Query parameters work properly with OData.Feed(). When I try, I get weird errors where the rows for every page of results are exactly the same as for the first page of results.)
+
+SearchSuccessful = (Term) =>
+    let
+
+    Source = Json.Document(Web.Contents(
+    urlRequestString,
+    [
+    Query=[#"startrow"=Term],
+    Headers=[#"Accept"="application/json"]
+    ])),
+
+    Rows= Source[PrimaryQueryResult][RelevantResults][Table][Rows],
+    AllRows = List.Transform(Rows, each _[Cells]),
+    RowsToTables = List.Transform(AllRows, each List.Transform(_, each Record.ToTable(_))),
+    SkelToList = List.Transform(RowsToTables, each Table.FromList(_, Splitter.SplitByNothing(), null, null, ExtraValues.Error)),
+    CleanRows = List.Transform(SkelToList, each List.Transform(_[Column1], each Table.PromoteHeaders(Table.RemoveLastN( Table.RemoveColumns( _,{"Name"}), 1) ) ) ),
+    TransposeTable = Table.FromRows(List.Transform(CleanRows, each List.Transform(_, each Record.FieldValues(_{0}){0} ))),
+    ColumnRenames = List.Transform(CleanRows{0}, each { "Column" & Text.From( List.PositionOf(CleanRows{0}, _) + 1), Table.ColumnNames(_){0}}),
+    RenamedTable = Table.RenameColumns(TransposeTable, ColumnRenames)
+
+    in
+    RenamedTable ,
+
+// Call SearchSuccessful multiple times to get all the rows
+
+Output =
+Table.AddColumn(
+Termset,
+"c",
+each SearchSuccessful([Term])
+),
+
+// Output will be a table of tables. The following transforms Output into a single table of all the rows.
+// If you change the "selectproperties=", you can either edit the code below by hand, or regenerate it by selecting Output in the Applied Steps righthand pane and doing and "Expand Column" on the "c" column
+
+    #"SPResultsTable" = Table.ExpandTableColumn(Output, "c", {"Rank", "DocId", "Path", "Filename", "OriginalPath", "PartitionId", "UrlZone", "Culture", "ResultTypeId", "RenderTemplateId"}, 
+    {"Rank", "DocId", "Path", "Filename", "OriginalPath", "PartitionId", "UrlZone", "Culture", "ResultTypeId", "RenderTemplateId"})
+in
+#"SPResultsTable"
