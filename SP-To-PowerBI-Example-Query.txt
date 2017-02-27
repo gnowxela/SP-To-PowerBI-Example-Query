@@ -1,3 +1,7 @@
+// WARNING: I’ve found that the REST service begins to have trouble and give erroneous results (no returned rows and other errors) when the startrow starts getting beyond 70000.
+// Have also verified this using a simple URL request in a browser.
+// The workaround is to qualify the KQL query to keep the Total Rows returned to under this number (50k is probably good).
+
 // By Alex Wong, alex.wong@gimmal.com
 // This PowerBI query gets rows of data out of O365 SharePoint Online based on a SharePoint Search KQL Query sent to the SharePoint REST service.
 // (Have not yet tried on SP2013)
