@@ -1,0 +1,175 @@
+// By Alex Wong, alex.wong@gimmal.com
+// This example addresses the 70,000 row limit in SP-To-PowerBI-Example-Query.txt by chunking over multiple site collections.
+// Read through the comments in SP-To-PowerBI-Example-Query.txt to get a better idea of the basic approach built upon by this code.
+
+// This PowerBI query gets rows of data out of O365 SharePoint Online based on a SharePoint Search KQL Query sent to the SharePoint REST service.
+// (Have not yet tried on SP2013)
+// It is the only one I have found that can get more than 70,000 rows, and also can refresh on both Power BI Desktop and Power BI Online.
+// Built upon Paul Keijzers' solution at https://sharepoint-specialist.nu/connect-power-bi-online-to-sharepoint-search-using-rest-ca6e681233b8
+// Suggested by Matthew Stark at http://makingthings.work/connect-power-bi-to-sp-search/ . Many many thanks.
+
+// Usage: Paste this code into a PowerBI Query (in the Advanced Editor window) and adjust the urlRequestString (YourSiteOrTenant) to point to your tenant or site.
+// Adjust the querytext= with your KQL query (that you can test in the SharePoint UI, in "Everything" mode).
+// Adjust the selectproperties= with the SharePoint Managed Property values you want returned in the rows. https://technet.microsoft.com/en-us/library/jj219630.aspx https://technet.microsoft.com/en-us/library/jj613136.aspx
+
+// The basic strategy here is to avoid any single KQL query that returns TotalRows > 70,000, because startrow > 70,000 will cause problems.
+// In this example, we do it by doing one KQL query per Site Collection. If no single Site Collection returns more than 70,000 rows, then we should be good.
+// If, however, you have a Site Collection that may return > 70,000 rows, you will have to use KQL to slice your requests into Library or even folder sized chunks.
+// As long as you end up with a set of KQL queries that get what you want, but where no one query gets you > 70,000 rows, you are good.
+
+let
+
+// Define the function to get the table of site collections
+GetSiteCollections = () as table => 
+
+    let
+
+    // Remember, the urlRequestString must be static. Otherwise, the dataset will not refresh in PowerBI Online
+    // Note also that  site <> https://YourSiteOrTenant.sharepoint.com  filters out the root site. Otherwise, we get two copies of everything.
+    urlRequestString = "https://YourSiteOrTenant.sharepoint.com/_api/search/query?querytext='contentclass:STS_Site site <> https://YourSiteOrTenant.sharepoint.com'&trimduplicates=false&rowlimit=500&selectproperties='SiteID,SiteTitle,Path'",
+
+    Source = Json.Document(Web.Contents(
+    urlRequestString,
+    [
+    Headers=[#"Accept"="application/json"]
+    ])),
+
+    PrimaryQueryResult = Source[PrimaryQueryResult],
+    RelevantResults = PrimaryQueryResult[RelevantResults][TotalRows],
+
+    Offset = List.Generate(()=>0, each _ <= Number.RoundTowardZero( RelevantResults /100)*100, each _ + 500),
+    OffsetToTable = Table.FromList(Offset, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+    Terms = Table.RenameColumns(OffsetToTable,{{"Column1", "Term"}}),
+    #"Removed Top Rows" = Table.Skip(Terms,0),
+    Termset = Table.TransformColumnTypes(#"Removed Top Rows",{{"Term", type text}}),
+
+    SearchSuccessful = (Term) =>
+        let
+
+        Source = Json.Document(Web.Contents(
+        urlRequestString,
+        [
+        Query=[#"startrow"=Term],
+        Headers=[#"Accept"="application/json"]
+        ])),
+
+        Rows= Source[PrimaryQueryResult][RelevantResults][Table][Rows],
+        AllRows = List.Transform(Rows, each _[Cells]),
+        RowsToTables = List.Transform(AllRows, each List.Transform(_, each Record.ToTable(_))),
+        SkelToList = List.Transform(RowsToTables, each Table.FromList(_, Splitter.SplitByNothing(), null, null, ExtraValues.Error)),
+        CleanRows = List.Transform(SkelToList, each List.Transform(_[Column1], each Table.PromoteHeaders(Table.RemoveLastN( Table.RemoveColumns( _,{"Name"}), 1) ) ) ),
+        TransposeTable = Table.FromRows(List.Transform(CleanRows, each List.Transform(_, each Record.FieldValues(_{0}){0} ))),
+        ColumnRenames = List.Transform(CleanRows{0}, each { "Column" & Text.From( List.PositionOf(CleanRows{0}, _) + 1), Table.ColumnNames(_){0}}),
+        RenamedTable = Table.RenameColumns(TransposeTable, ColumnRenames)
+
+        in
+        RenamedTable ,
+
+    Output =
+    Table.AddColumn(
+    Termset,
+    "c",
+    each SearchSuccessful([Term])
+    ),
+        #"SPSearchResults" = Table.ExpandTableColumn(Output, "c", {"Rank", "DocId", "SiteID", "SiteTitle", "Path", "OriginalPath", "PartitionId", "UrlZone", "Culture", "ResultTypeId", "RenderTemplateId"}, {"Rank", "DocId", "SiteID", "SiteTitle", "Path", "OriginalPath", "PartitionId", "UrlZone", "Culture", "ResultTypeId", "RenderTemplateId"})
+    in
+        #"SPSearchResults",
+// End Define the function to get the table of site collections
+
+// Define the function to get the rows from one Site Collection
+GetOneSiteCollection = (Term) as table => 
+
+let
+
+    // This example looks for things of Content Type Document. You can adjust the KQL for your purposes
+    queryTextString = "'contenttype:""Document"" site:" & Term & "'",
+
+    // Remember, the urlRequestString must be static. Otherwise, the dataset will not refresh in PowerBI Online
+    urlRequestString = "https://YourSiteOrTenant.sharepoint.com/_api/search/query?trimduplicates=false&rowlimit=500&selectproperties='Path,Filename'",
+
+    Source = Json.Document(Web.Contents(
+    urlRequestString,
+    [
+        Query=[#"startrow"="0"
+    ,#"querytext"=queryTextString
+    ],
+    Headers=[#"Accept"="application/json"]
+    ])),
+
+    PrimaryQueryResult = Source[PrimaryQueryResult],
+    RelevantResults = PrimaryQueryResult[RelevantResults][TotalRows],
+
+    Offset = List.Generate(()=>0, each _ <= Number.RoundTowardZero( RelevantResults /100)*100, each _ + 500),
+    OffsetToTable = Table.FromList(Offset, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+    Terms = Table.RenameColumns(OffsetToTable,{{"Column1", "Term"}}),
+    #"Removed Top Rows" = Table.Skip(Terms,0),
+    Termset = Table.TransformColumnTypes(#"Removed Top Rows",{{"Term", type text}}),
+
+    SearchSuccessful = (Term) =>
+        let
+
+        Source = Json.Document(Web.Contents(
+        urlRequestString,
+        [
+            Query=[#"startrow"=Term
+        ,#"querytext"=queryTextString
+        ],
+        Headers=[#"Accept"="application/json"]
+        ])),
+
+        Rows= Source[PrimaryQueryResult][RelevantResults][Table][Rows],
+        AllRows = List.Transform(Rows, each _[Cells]),
+        RowsToTables = List.Transform(AllRows, each List.Transform(_, each Record.ToTable(_))),
+        SkelToList = List.Transform(RowsToTables, each Table.FromList(_, Splitter.SplitByNothing(), null, null, ExtraValues.Error)),
+        CleanRows = List.Transform(SkelToList, each List.Transform(_[Column1], each Table.PromoteHeaders(Table.RemoveLastN( Table.RemoveColumns( _,{"Name"}), 1) ) ) ),
+        TransposeTable = Table.FromRows(List.Transform(CleanRows, each List.Transform(_, each Record.FieldValues(_{0}){0} ))),
+        ColumnRenames = List.Transform(CleanRows{0}, each { "Column" & Text.From( List.PositionOf(CleanRows{0}, _) + 1), Table.ColumnNames(_){0}}),
+        RenamedTable = Table.RenameColumns(TransposeTable, ColumnRenames)
+
+        in
+        RenamedTable ,
+
+    // The try .. otherwise syntax here accounts for situations where the query returns no rows
+    Output =
+    Table.AddColumn(
+    Termset,
+    "c",
+    each try SearchSuccessful([Term]) otherwise null
+    ),
+
+        SPResultsTable = Table.ExpandTableColumn(Output, "c", {"Rank", "DocId", "Path", "Filename", "OriginalPath", "PartitionId", "UrlZone", "Culture", "ResultTypeId", "RenderTemplateId"}, 
+        {"Rank", "DocId", "Path", "Filename", "OriginalPath", "PartitionId", "UrlZone", "Culture", "ResultTypeId", "RenderTemplateId"})
+
+    in
+    SPResultsTable,
+
+// End: Define the function to get the rows from one Site Collection
+
+// The real work starts here
+
+// Call the function to get the table of Site Collections
+    allSiteCollections = GetSiteCollections(),
+    siteCollList = allSiteCollections[Path],
+    OffsetToTable = Table.FromList(siteCollList, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+    Termset = Table.RenameColumns(OffsetToTable,{{"Column1", "Term"}}),
+
+// Iterate over the table of site collections to get all the rows
+    // The try .. otherwise syntax here accounts for situations where the query returns no rows
+    Output =
+    Table.AddColumn(
+    Termset,
+    "c",
+    each try GetOneSiteCollection([Term]) otherwise null
+    ),
+
+    // Remove the null rows that come from Site Collections that returned no rows
+    Output2 = Table.SelectRows(Output,each [c] <> null ),
+
+    RootResultsTable2 = Table.ExpandTableColumn(Output2, "c", {"Rank", "DocId", "Path", "Filename", "OriginalPath", "PartitionId", "UrlZone", "Culture", "ResultTypeId", "RenderTemplateId"}, 
+    {"Rank", "DocId", "Path", "Filename", "OriginalPath", "PartitionId", "UrlZone", "Culture", "ResultTypeId", "RenderTemplateId"}),
+
+    #"RootResultsTable" = Table.SelectRows(RootResultsTable2,each [Path] <> null )
+
+
+in
+#"RootResultsTable"
