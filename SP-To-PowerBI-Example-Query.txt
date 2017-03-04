@@ -1,4 +1,4 @@
-// WARNING: I’ve found that the REST service begins to have trouble and give erroneous results (no returned rows and other errors) when the startrow starts getting beyond 70000.
+// WARNING: Iï¿½ve found that the REST service begins to have trouble and give erroneous results (no returned rows and other errors) when the startrow starts getting beyond 70000.
 // Have also verified this using a simple URL request in a browser.
 // The workaround is to qualify the KQL query to keep the Total Rows returned to under this number (50k is probably good).
 
@@ -26,7 +26,7 @@ let
 urlRequestString = "https://YourTenantOrSite.sharepoint.com/_api/search/query" & "?querytext='contenttype:Document'&trimduplicates=false&rowlimit=500&selectproperties='Path,Filename'",
 
 // The following two lines will get you a "You can't schedule refresh for this dataset because one or more sources currently don't support refresh." error in PowerBI online.
-//urlRequestString = "https://gimmaltraining1.sharepoint.com/_api/search/query" & queryParams,
+//urlRequestString = "https://YourTenantOrSite.sharepoint.com/_api/search/query" & queryParams,
 //urlRequestString = queryParams,
 
 // Initial Web request to only get TotalRows
